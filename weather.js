@@ -1,40 +1,36 @@
+//本地测试
+// import axios from "axios";
+// import nodemailer from "nodemailer";
+// import yaml from "js-yaml";
+// import fs from "fs";
+//服务器
 const axios = require("axios");
 const nodemailer = require("nodemailer");
+const yaml = require("js-yaml");
+const fs = require("fs");
+const path = require("path");
 
-// 用户列表，每个用户包含邮箱和城市代码
-const users = [
-  { email: "1523610551@qq.com", citycode: "101220505" },
-  { email: "2192280631@qq.com", citycode: "101220505" },
-];
+//读取配置
+const configPath = path.join(__dirname, "config.yaml"); // 获取绝对路径
 
-// 邮箱配置
+const fileContents = fs.readFileSync(configPath, "utf8");
+const config = yaml.load(fileContents); //将获取到的数据存储在config中
+const users = config.users; //读取用户配置
+const info = { hint: [], hint_priority: [] }; //存储天气数据
+const warn_weather = {}; //存储预警数据
+const hints = config.hints; //读取生活指数
+info.hint_num = config.hint_num; //读取生活指数显示个数
+info.hint_priority = config.hint_priority; //读取生活指数优先级
+var wea = config.wea; //读取天气代码
+
+// 读取邮箱配置
 var transporter = nodemailer.createTransport({
-  service: "QQ",
+  service: config.email_config.service,
   auth: {
-    user: "860733455@qq.com", // 发送者邮箱
-    pass: "yerfpvttzwpfbbjf", // 邮箱第三方登录授权码
+    user: config.email_config.auth.user,
+    pass: config.email_config.auth.pass,
   },
 });
-
-// 天气代码
-var wea = {
-  "00": "晴",
-  "01": "多云",
-  "02": "阴",
-  "03": "阵雨",
-  "04": "雷阵雨",
-  "05": "雷阵雨伴有冰雹",
-  "06": "雨夹雪",
-  "07": "小雨",
-  "08": "中雨",
-  "09": "大雨",
-  10: "暴雨",
-  13: "阵雪",
-  14: "小雪",
-  15: "中雪",
-  16: "大雪",
-  17: "暴雪",
-};
 
 // 生成时间戳
 var timedate = Date.now();
@@ -63,21 +59,30 @@ const delay = (ms) => {
   return new Promise((resolve) => setTimeout(resolve, ms));
 };
 
+//获取天气指数函数
+function getWeatherHints(info, priority, count) {
+  const hintsToOutput = priority
+    .slice(0, count)
+    .map((index) => info.hint[index]);
+  return hintsToOutput;
+}
+
 // 处理每个用户的函数
 async function processUser(user) {
   try {
-    const response = await axios.get(
+    /***获取今日天气***/
+    /** 包含天气状况 **/
+    /*****************/
+    const response1 = await axios.get(
       `https://d1.weather.com.cn/weather_index/${user.citycode}.html?_=${timedate}`,
       {
         headers: {
           referer: "http://www.weather.com.cn/",
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
         },
       }
     );
 
-    const inform = response.data;
+    const inform = response1.data;
     // 今日天气
     const cityDZ = extractData(inform, "cityDZ");
 
@@ -90,7 +95,6 @@ async function processUser(user) {
     // 近日天气
     const fc = extractData(inform, "fc");
 
-    const info = {};
     info.city = cityDZ.weatherinfo.city;
 
     // 今日天气
@@ -122,30 +126,60 @@ async function processUser(user) {
         ? wea[fc.f[2].fb]
         : `${wea[fc.f[2].fb]}转${wea[fc.f[2].fa]}`;
 
-    // 大后天天气
-    info.max_temp_4 = fc.f[3].fc;
-    info.min_temp_4 = fc.f[3].fd;
-    info.air_4 = fc.f[3].fm;
-    info.wet_4 = parseFloat(fc.f[3].fn);
-    info.weather_4 =
-      fc.f[3].fb === fc.f[3].fa
-        ? wea[fc.f[3].fb]
-        : `${wea[fc.f[3].fb]}转${wea[fc.f[3].fa]}`;
+    hints.forEach((hint, index) => {
+      info.hint[index + 1] = dataZS.zs[hint];
+    });
 
-    // 生活指数
-    info.clothes_1 = (info.wet_1 + info.wet_2 + info.wet_3) / 3;
-    info.clothes_2 = (info.wet_2 + info.wet_3 + info.wet_4) / 3;
-    if (info.clothes_1 < info.clothes_2 || info.wet_1 > 75)
-      info.dry = "可以拖一天晒";
-    else {
-      if (info.clothes_1 < 60) info.dry = "衣服能干,建议晒";
-      else if (info.clothes_1 < 70) info.dry = "衣服能干，干得慢";
-      else info.dry = "衣服很难干,三思";
+    //指数输出
+    info.hint_out = getWeatherHints(info, info.hint_priority, info.hint_num);
+
+    /***获取小时天气预警***/
+    /*********＊＊********/
+
+    const response2 = await axios.get(
+      `
+https://d1.weather.com.cn/wap_40d/${user.citycode}.html?_=${timedate}`,
+      {
+        headers: {
+          referer: "http://www.weather.com.cn/",
+        },
+      }
+    );
+    const warn = response2.data;
+
+    const inform_24 = extractData(warn, "fc1h_24");
+
+    //获取小时天气数据
+    for (let i = 0; i < config.warn_num; i++) {
+      if (inform_24.jh[i].ja > 2) {
+        warn_weather.hour = parseInt(inform_24.jh[i].jf.substring(8, 10), 10);
+        warn_weather.info = wea[inform_24.jh[i].ja];
+        break;
+      } else {
+        warn_weather.hour = 999;
+      }
     }
 
-    // 邮件内容
+    /***配置邮箱发送内容***/
+    /*********＊＊********/
+
+    // 配置发件人
+    const generateFromEmail = (prefix, email = "860733455@qq.com") => {
+      return `"${prefix}" <${email}>`;
+    };
+
+    // 构建发件人名称
+    const noRainPrefix = `今日${info.weather},${config.warn_num}h内无雨`;
+    const rainAlertPrefix = `${warn_weather.hour}时有${warn_weather.info},记得带伞`;
+
+    // 生成最终邮箱地址
+    warn_weather.hour === 999
+      ? generateFromEmail(noRainPrefix)
+      : generateFromEmail(rainAlertPrefix);
+
+    // 邮件配置对象
     const mailOptions = {
-      from: `${info.city}今日${info.weather}<860733455@qq.com>`, // 发送者邮箱
+      from: `"${noRainPrefix}" <860733455@qq.com>`,
       to: user.email, // 收件人邮箱
       subject: `气温${info.min_temp_1}℃~${info.max_temp_1}℃♥`, // 邮件主题
       html: `<!DOCTYPE html>
@@ -162,21 +196,35 @@ async function processUser(user) {
         <div style="padding: 32px; text-align: center;">
             <div style="display: inline-block; margin: 0 12px; padding: 16px; border: 1px solid #eeeeee; border-radius: 8px;">
                 <div style="color: #666666; margin-bottom: 8px;">明天</div>
-                <div style="font-size: 20px; color: #333333; margin-bottom: 8px;">${info.weather_2}</div>
-                <div style="color: #888888;">${info.min_temp_2}℃ ~ ${info.max_temp_2}℃</div>
+                <div style="font-size: 20px; color: #333333; margin-bottom: 8px;">${
+                  info.weather_2
+                }</div>
+                <div style="color: #888888;">${info.min_temp_2}℃ ~ ${
+        info.max_temp_2
+      }℃</div>
             </div>
 
             <div style="display: inline-block; margin: 0 12px; padding: 16px; border: 1px solid #eeeeee; border-radius: 8px;">
                 <div style="color: #666666; margin-bottom: 8px;">后天</div>
-                <div style="font-size: 20px; color: #333333; margin-bottom: 8px;">${info.weather_3}</div>
-                <div style="color: #888888;">${info.min_temp_3}℃ ~ ${info.max_temp_3}℃</div>
+                <div style="font-size: 20px; color: #333333; margin-bottom: 8px;">${
+                  info.weather_3
+                }</div>
+                <div style="color: #888888;">${info.min_temp_3}℃ ~ ${
+        info.max_temp_3
+      }℃</div>
             </div>
         </div>
 
         <!-- 温馨提示 -->
         <div style="padding: 24px 32px; background-color: #f8f9fa; border-radius: 0 0 8px 8px;">
             <div style="color: #666666; font-size: 14px; line-height: 1.6;">
-                🌸 温馨提示：${info.dry}
+                 ${info.hint_out
+                   .map(
+                     (hint) => `🌸
+${hint}<br>
+`
+                   )
+                   .join("")}
             </div>
         </div>
     </div>
